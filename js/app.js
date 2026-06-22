@@ -202,20 +202,33 @@ let cvReady = null;
 function loadOpenCV() {
   if (cvReady) return cvReady;
   cvReady = new Promise((resolve, reject) => {
-    if (window.cv && window.cv.Mat) return resolve(window.cv);
+    // Resolve as soon as the WASM runtime is actually usable (cv.Mat exists).
+    // We poll instead of relying solely on onRuntimeInitialized, which races
+    // with the script's onload and is easy to miss on fast/cached loads.
+    const TIMEOUT_MS = 90000;
+    const started = Date.now();
+    let poll = null;
+    const isReady = () => window.cv && typeof window.cv.Mat === "function";
+    const finish = () => { clearInterval(poll); resolve(window.cv); };
+
+    if (isReady()) return resolve(window.cv);
+
     const script = document.createElement("script");
     script.src = "https://docs.opencv.org/4.9.0/opencv.js";
     script.async = true;
-    script.onload = () => {
-      const cv = window.cv;
-      // OpenCV.js may expose a promise-like module or use onRuntimeInitialized.
-      if (cv && cv.Mat) return resolve(cv);
-      if (cv && typeof cv.then === "function") return cv.then(resolve, reject);
-      cv.onRuntimeInitialized = () => resolve(window.cv);
-    };
-    script.onerror = () => reject(new Error("Failed to load OpenCV.js"));
+    script.onerror = () => { clearInterval(poll); reject(new Error("Failed to load OpenCV.js (network/CDN)")); };
     document.head.appendChild(script);
+
+    poll = setInterval(() => {
+      if (isReady()) return finish();
+      if (Date.now() - started > TIMEOUT_MS) {
+        clearInterval(poll);
+        reject(new Error("OpenCV.js init timed out"));
+      }
+    }, 100);
   });
+  // If a load attempt fails, allow a later retry instead of caching the failure.
+  cvReady.catch(() => { cvReady = null; });
   return cvReady;
 }
 
@@ -287,7 +300,9 @@ function orderCorners(pts) {
 
 async function detectCard() {
   try {
-    setStatus("Loading card detector…");
+    setStatus(window.cv && window.cv.Mat
+      ? "Detecting card…"
+      : "Loading card detector (one-time ~10 MB download)…");
     const cv = await loadOpenCV();
     setStatus("Detecting card…");
     const quad = findCardQuad(cv);
