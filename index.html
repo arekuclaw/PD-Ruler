@@ -22,11 +22,25 @@
       </p>
       <div class="input-row">
         <label class="btn">
-          Upload / Take photo
-          <input type="file" id="fileInput" accept="image/*" capture="user" hidden />
+          Upload photo
+          <input type="file" id="fileInput" accept="image/*" hidden />
         </label>
-        <button class="btn secondary" id="demoBtn" hidden>Load sample</button>
+        <button class="btn secondary" id="cameraBtn">Use camera</button>
       </div>
+    </section>
+
+    <section class="panel" id="step-camera" hidden>
+      <h2>Camera</h2>
+      <p class="hint">Hold the ID card flat in the same plane as your eyes, parallel to the lens, and look straight ahead.</p>
+      <div class="canvas-wrap">
+        <video id="video" playsinline autoplay muted></video>
+      </div>
+      <div class="controls">
+        <button class="btn" id="captureBtn">Capture</button>
+        <button class="btn secondary" id="switchCamBtn" hidden>Switch camera</button>
+        <button class="btn secondary" id="cancelCamBtn">Cancel</button>
+      </div>
+      <div id="camStatus" class="status"></div>
     </section>
 
     <section class="panel" id="step-measure" hidden>
@@ -53,6 +67,7 @@
           <input type="number" id="customMm" min="1" step="0.1" value="85.6" />
         </div>
         <button class="btn secondary" id="redetectBtn">Re-detect pupils</button>
+        <button class="btn secondary" id="detectCardBtn">Detect card</button>
         <button class="btn secondary" id="resetBtn">New photo</button>
       </div>
 

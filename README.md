@@ -9,10 +9,16 @@ to millimeters.
 
 ## How it works
 
+0. **Capture** — upload a photo *or* use the built-in **live camera preview** to take one
+   directly in the browser.
 1. **Pupil detection** — [MediaPipe FaceLandmarker](https://ai.google.dev/edge/mediapipe)
    locates the iris centers (landmarks 468 and 473) and measures the pixel distance
    between them.
-2. **Scale reference** — you mark one edge of the card. An ID-1 card is a fixed size:
+2. **Scale reference** — the card is found **automatically** via
+   [OpenCV.js](https://docs.opencv.org/4.x/d5/d10/tutorial_js_root.html): it detects the
+   largest convex quadrilateral with an ID-1-like aspect ratio (≈1.586) and places the
+   markers on its long edge. You can also press **Detect card** to retry, or drag the
+   markers manually. An ID-1 card is a fixed size:
    - Long edge: **85.60 mm**
    - Short edge: **53.98 mm**
 3. **Conversion** — the app computes:
@@ -59,4 +65,9 @@ Or deploy the repo to **GitHub Pages** (Settings → Pages → deploy from `main
 
 - Vanilla JS (ES modules), HTML, CSS — no framework, no bundler
 - [@mediapipe/tasks-vision](https://www.npmjs.com/package/@mediapipe/tasks-vision) for face/iris landmarks
+- [OpenCV.js](https://docs.opencv.org/4.9.0/opencv.js) (loaded on demand) for automatic card detection
+- `getUserMedia` for in-browser camera capture
 - HTML Canvas for overlay and interactive markers
+
+> Camera capture requires a **secure context** — `https://` or `http://localhost`.
+> It will not work over a plain LAN IP like `http://192.168.x.x`.

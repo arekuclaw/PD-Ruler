@@ -35,6 +35,8 @@ const statusEl = $("status");
 const cardEdge = $("cardEdge");
 const customWrap = $("customWrap");
 const customMm = $("customMm");
+const video = $("video");
+const camStatus = $("camStatus");
 
 // --- Model bootstrap ---------------------------------------------------------
 async function initLandmarker() {
@@ -77,6 +79,7 @@ function loadImageFile(file) {
 async function onImageReady(img) {
   state.img = img;
   layoutCanvas();
+  $("step-camera").hidden = true;
   $("step-measure").hidden = false;
   $("step-result").hidden = false;
   // Default card handles: a horizontal segment near the bottom third.
@@ -88,7 +91,75 @@ async function onImageReady(img) {
   state.handles.rightPupil = { x: w * 0.58, y: h * 0.40 };
   draw();
   await detectPupils();
+  await detectCard();
 }
+
+// --- Camera live preview -----------------------------------------------------
+let stream = null;
+let useFrontCamera = true;
+
+async function openCamera() {
+  $("step-input").hidden = true;
+  $("step-camera").hidden = false;
+  await startStream();
+}
+
+async function startStream() {
+  stopStream();
+  setCamStatus("Starting camera…");
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: useFrontCamera ? "user" : "environment" },
+      audio: false,
+    });
+    video.srcObject = stream;
+    await video.play();
+    setCamStatus("");
+    // Only offer "switch" when more than one camera is present.
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cams = devices.filter((d) => d.kind === "videoinput");
+      $("switchCamBtn").hidden = cams.length < 2;
+    } catch { /* device enumeration optional */ }
+  } catch (err) {
+    console.error(err);
+    setCamStatus("Camera unavailable — " + err.message + ". Use Upload photo instead.");
+  }
+}
+
+function stopStream() {
+  if (stream) {
+    stream.getTracks().forEach((t) => t.stop());
+    stream = null;
+  }
+  video.srcObject = null;
+}
+
+function captureFrame() {
+  if (!stream || !video.videoWidth) {
+    setCamStatus("Camera not ready yet.");
+    return;
+  }
+  const off = document.createElement("canvas");
+  off.width = video.videoWidth;
+  off.height = video.videoHeight;
+  const octx = off.getContext("2d");
+  // Capture the raw frame so the still exactly matches the live preview.
+  // (Mirroring is purely cosmetic and PD is invariant to it.)
+  octx.drawImage(video, 0, 0, off.width, off.height);
+  const img = new Image();
+  img.onload = () => onImageReady(img);
+  img.src = off.toDataURL("image/jpeg", 0.95);
+  stopStream();
+}
+
+function closeCamera() {
+  stopStream();
+  $("step-camera").hidden = true;
+  $("step-input").hidden = false;
+}
+
+function setCamStatus(msg) { camStatus.textContent = msg; }
 
 function layoutCanvas() {
   const img = state.img;
@@ -121,6 +192,129 @@ async function detectPupils() {
   } catch (err) {
     console.error(err);
     setStatus("Detection failed — place the cyan markers manually. (" + err.message + ")");
+  }
+}
+
+// --- Card detection (OpenCV.js) ----------------------------------------------
+const ID1_RATIO = 85.6 / 53.98; // ≈ 1.586, long/short of an ID-1 card
+let cvReady = null;
+
+function loadOpenCV() {
+  if (cvReady) return cvReady;
+  cvReady = new Promise((resolve, reject) => {
+    if (window.cv && window.cv.Mat) return resolve(window.cv);
+    const script = document.createElement("script");
+    script.src = "https://docs.opencv.org/4.9.0/opencv.js";
+    script.async = true;
+    script.onload = () => {
+      const cv = window.cv;
+      // OpenCV.js may expose a promise-like module or use onRuntimeInitialized.
+      if (cv && cv.Mat) return resolve(cv);
+      if (cv && typeof cv.then === "function") return cv.then(resolve, reject);
+      cv.onRuntimeInitialized = () => resolve(window.cv);
+    };
+    script.onerror = () => reject(new Error("Failed to load OpenCV.js"));
+    document.head.appendChild(script);
+  });
+  return cvReady;
+}
+
+// Locate the largest convex quadrilateral whose aspect ratio resembles an
+// ID-1 card, and return its 4 corners in natural-image coordinates, or null.
+function findCardQuad(cv) {
+  const src = cv.imread(state.img); // natural-resolution RGBA
+  const gray = new cv.Mat();
+  const blur = new cv.Mat();
+  const edges = new cv.Mat();
+  const contours = new cv.MatVector();
+  const hierarchy = new cv.Mat();
+  let best = null;
+  try {
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
+    cv.Canny(blur, edges, 50, 150);
+    const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
+    cv.dilate(edges, edges, kernel);
+    kernel.delete();
+    cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+
+    const imgArea = src.rows * src.cols;
+    for (let i = 0; i < contours.size(); i++) {
+      const cnt = contours.get(i);
+      const area = cv.contourArea(cnt);
+      if (area < imgArea * 0.01) { cnt.delete(); continue; } // ignore tiny blobs
+      const peri = cv.arcLength(cnt, true);
+      const approx = new cv.Mat();
+      cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
+      if (approx.rows === 4 && cv.isContourConvex(approx)) {
+        const pts = [];
+        for (let r = 0; r < 4; r++) {
+          pts.push({ x: approx.data32S[r * 2], y: approx.data32S[r * 2 + 1] });
+        }
+        const ordered = orderCorners(pts);
+        const wTop = dist(ordered[0], ordered[1]);
+        const wBot = dist(ordered[3], ordered[2]);
+        const hL = dist(ordered[0], ordered[3]);
+        const hR = dist(ordered[1], ordered[2]);
+        const longSide = (wTop + wBot) / 2;
+        const shortSide = (hL + hR) / 2;
+        const ratio = Math.max(longSide, shortSide) / Math.min(longSide, shortSide);
+        // Score: prefer card-like ratio and larger area.
+        const ratioErr = Math.abs(ratio - ID1_RATIO);
+        if (ratioErr < 0.35) {
+          const score = area / (1 + ratioErr * imgArea * 0.0005);
+          if (!best || score > best.score) best = { corners: ordered, score };
+        }
+      }
+      approx.delete();
+      cnt.delete();
+    }
+  } finally {
+    src.delete(); gray.delete(); blur.delete(); edges.delete();
+    contours.delete(); hierarchy.delete();
+  }
+  return best ? best.corners : null;
+}
+
+// Order 4 points as [top-left, top-right, bottom-right, bottom-left].
+function orderCorners(pts) {
+  const bySum = [...pts].sort((a, b) => (a.x + a.y) - (b.x + b.y));
+  const tl = bySum[0], br = bySum[3];
+  const rest = bySum.slice(1, 3).sort((a, b) => (a.x - a.y) - (b.x - b.y));
+  const bl = rest[0], tr = rest[1];
+  return [tl, tr, br, bl];
+}
+
+async function detectCard() {
+  try {
+    setStatus("Loading card detector…");
+    const cv = await loadOpenCV();
+    setStatus("Detecting card…");
+    const quad = findCardQuad(cv);
+    if (!quad) {
+      setStatus("Card not auto-detected — place the orange markers on a card edge manually.");
+      return;
+    }
+    // Choose the long edge (top side) and map natural → canvas coords.
+    const wTop = dist(quad[0], quad[1]);
+    const hL = dist(quad[0], quad[3]);
+    let a, b;
+    if (wTop >= hL) {
+      a = quad[0]; b = quad[1]; // top edge is the long edge
+    } else {
+      a = quad[0]; b = quad[3]; // left edge is the long edge
+    }
+    const s = state.scale;
+    state.handles.cardA = { x: a.x * s, y: a.y * s };
+    state.handles.cardB = { x: b.x * s, y: b.y * s };
+    // The auto-picked edge is the long edge → match the reference selector.
+    cardEdge.value = "85.6";
+    customWrap.hidden = true;
+    setStatus("Card detected. Verify the orange markers sit on one card edge.");
+    draw();
+  } catch (err) {
+    console.error(err);
+    setStatus("Card detection failed — place the orange markers manually. (" + err.message + ")");
   }
 }
 
@@ -264,11 +458,23 @@ cardEdge.addEventListener("change", () => {
 });
 customMm.addEventListener("input", draw);
 $("redetectBtn").addEventListener("click", detectPupils);
+$("detectCardBtn").addEventListener("click", detectCard);
 $("resetBtn").addEventListener("click", () => {
   fileInput.value = "";
   $("step-measure").hidden = true;
   $("step-result").hidden = true;
+  $("step-camera").hidden = true;
+  $("step-input").hidden = false;
   state.img = null;
+});
+
+// Camera controls
+$("cameraBtn").addEventListener("click", openCamera);
+$("captureBtn").addEventListener("click", captureFrame);
+$("cancelCamBtn").addEventListener("click", closeCamera);
+$("switchCamBtn").addEventListener("click", async () => {
+  useFrontCamera = !useFrontCamera;
+  await startStream();
 });
 
 function setStatus(msg) {
