@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PD Ruler — Pupillary Distance Measurement</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <header>
+    <h1>PD Ruler ⚡</h1>
+    <p class="tagline">Measure pupillary distance from a photo using a driver license as scale.</p>
+  </header>
+
+  <main>
+    <section class="panel" id="step-input">
+      <h2>1 · Add a photo</h2>
+      <p class="hint">
+        Take a straight-on photo of the face with a driver license (or any ID-1 card)
+        held flat against the forehead or cheek — <strong>in the same plane as the eyes</strong>,
+        parallel to the camera. Look directly at the lens.
+      </p>
+      <div class="input-row">
+        <label class="btn">
+          Upload / Take photo
+          <input type="file" id="fileInput" accept="image/*" capture="user" hidden />
+        </label>
+        <button class="btn secondary" id="demoBtn" hidden>Load sample</button>
+      </div>
+    </section>
+
+    <section class="panel" id="step-measure" hidden>
+      <h2>2 · Adjust markers</h2>
+      <p class="hint">
+        Drag the two <span class="dot cyan"></span> pupil markers onto the pupils, and place the two
+        <span class="dot orange"></span> markers on opposite ends of the chosen card edge.
+      </p>
+      <div class="canvas-wrap">
+        <canvas id="canvas"></canvas>
+      </div>
+
+      <div class="controls">
+        <div class="control">
+          <label for="cardEdge">Reference card edge</label>
+          <select id="cardEdge">
+            <option value="85.6">Long edge — 85.60 mm (ID-1 standard)</option>
+            <option value="53.98">Short edge — 53.98 mm</option>
+            <option value="custom">Custom width…</option>
+          </select>
+        </div>
+        <div class="control" id="customWrap" hidden>
+          <label for="customMm">Custom width (mm)</label>
+          <input type="number" id="customMm" min="1" step="0.1" value="85.6" />
+        </div>
+        <button class="btn secondary" id="redetectBtn">Re-detect pupils</button>
+        <button class="btn secondary" id="resetBtn">New photo</button>
+      </div>
+
+      <div id="status" class="status"></div>
+    </section>
+
+    <section class="panel result" id="step-result" hidden>
+      <h2>3 · Result</h2>
+      <div class="pd-value"><span id="pdValue">—</span> <span class="unit">mm</span></div>
+      <div class="pd-sub">Binocular pupillary distance (PD)</div>
+      <details class="breakdown">
+        <summary>Measurement details</summary>
+        <ul id="breakdownList"></ul>
+      </details>
+    </section>
+  </main>
+
+  <footer>
+    <p>
+      Runs entirely in your browser — images are never uploaded.
+      Accuracy depends on the card being flat, parallel to the camera, and in the same plane as the eyes.
+      For prescription eyewear, confirm PD with an optician.
+    </p>
+  </footer>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
