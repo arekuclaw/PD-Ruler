@@ -208,7 +208,7 @@ const cvPending = new Map();
 
 function getCvWorker() {
   if (!cvWorker) {
-    cvWorker = new Worker("js/cv-worker.js");
+    cvWorker = new Worker("js/cv-worker.js?v=6");
     cvWorker.onmessage = (e) => {
       const { id, corners, error } = e.data;
       const p = cvPending.get(id);

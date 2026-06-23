@@ -40,8 +40,18 @@ function orderCorners(pts) {
   return [tl, tr, br, bl];
 }
 
-// Find the best card-like convex quad in an already-downscaled RGBA frame.
+// Find the best card-like rectangle in an already-downscaled RGBA frame.
 // Returns 4 corners in the frame's own coordinates, or null.
+//
+// Uses minAreaRect + fill ratio rather than a strict 4-vertex polygon: real
+// ID cards have rounded corners and are often slightly tilted, so the strict
+// approach rarely yields exactly four vertices. The aspect tolerance is kept
+// tight (ID-1 ≈ 1.586) so the detector returns null rather than a confident
+// false positive on a non-card rectangle — callers fall back to manual markers.
+const AR_TOLERANCE = 0.18; // accepted aspect-ratio deviation from ID-1
+const MIN_FILL = 0.82;     // contour must fill ≥82% of its bounding rectangle
+const MIN_AREA_FRAC = 0.015; // ignore rectangles smaller than 1.5% of the frame
+
 function findCardQuad(cv, imageData) {
   const src = cv.matFromImageData(imageData);
   const gray = new cv.Mat();
@@ -53,9 +63,10 @@ function findCardQuad(cv, imageData) {
   try {
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
     cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
-    cv.Canny(blur, edges, 50, 150);
-    const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
-    cv.dilate(edges, edges, kernel);
+    cv.Canny(blur, edges, 30, 90);
+    // Close gaps so a card outline becomes a single connected contour.
+    const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
+    cv.morphologyEx(edges, edges, cv.MORPH_CLOSE, kernel);
     kernel.delete();
     cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
 
@@ -63,26 +74,20 @@ function findCardQuad(cv, imageData) {
     for (let i = 0; i < contours.size(); i++) {
       const cnt = contours.get(i);
       const area = cv.contourArea(cnt);
-      if (area < imgArea * 0.01) { cnt.delete(); continue; }
-      const peri = cv.arcLength(cnt, true);
-      const approx = new cv.Mat();
-      cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
-      if (approx.rows === 4 && cv.isContourConvex(approx)) {
-        const pts = [];
-        for (let r = 0; r < 4; r++) {
-          pts.push({ x: approx.data32S[r * 2], y: approx.data32S[r * 2 + 1] });
-        }
-        const ordered = orderCorners(pts);
-        const longSide = (dist(ordered[0], ordered[1]) + dist(ordered[3], ordered[2])) / 2;
-        const shortSide = (dist(ordered[0], ordered[3]) + dist(ordered[1], ordered[2])) / 2;
-        const ratio = Math.max(longSide, shortSide) / Math.min(longSide, shortSide);
-        const ratioErr = Math.abs(ratio - ID1_RATIO);
-        if (ratioErr < 0.35) {
-          const score = area / (1 + ratioErr * imgArea * 0.0005);
-          if (!best || score > best.score) best = { corners: ordered, score };
+      if (area < imgArea * MIN_AREA_FRAC) { cnt.delete(); continue; }
+      const rect = cv.minAreaRect(cnt);
+      const rw = rect.size.width, rh = rect.size.height;
+      if (rw < 1 || rh < 1) { cnt.delete(); continue; }
+      const fill = area / (rw * rh);
+      const ratio = Math.max(rw, rh) / Math.min(rw, rh);
+      const ratioErr = Math.abs(ratio - ID1_RATIO);
+      if (ratioErr < AR_TOLERANCE && fill > MIN_FILL) {
+        const score = area * fill / (1 + ratioErr);
+        if (!best || score > best.score) {
+          const pts = cv.RotatedRect.points(rect).map((p) => ({ x: p.x, y: p.y }));
+          best = { corners: orderCorners(pts), score };
         }
       }
-      approx.delete();
       cnt.delete();
     }
   } finally {
