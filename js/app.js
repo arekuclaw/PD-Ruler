@@ -195,141 +195,70 @@ async function detectPupils() {
   }
 }
 
-// --- Card detection (OpenCV.js) ----------------------------------------------
-const ID1_RATIO = 85.6 / 53.98; // ≈ 1.586, long/short of an ID-1 card
-let cvReady = null;
+// --- Card detection (OpenCV.js, in a Web Worker) -----------------------------
+// All OpenCV work — the 10 MB WASM compile and the CV pipeline — runs in a
+// worker. The main thread only downscales the photo to a small RGBA frame and
+// awaits a message, so the page can never hang (RESULT_CODE_HUNG) regardless of
+// device speed.
+const CARD_PROC_MAXDIM = 1024; // cap the working resolution sent to the worker
 
-function loadOpenCV() {
-  if (cvReady) return cvReady;
-  cvReady = new Promise((resolve, reject) => {
-    // Resolve as soon as the WASM runtime is actually usable (cv.Mat exists).
-    // We poll instead of relying solely on onRuntimeInitialized, which races
-    // with the script's onload and is easy to miss on fast/cached loads.
-    const TIMEOUT_MS = 90000;
-    const started = Date.now();
-    let poll = null;
-    const isReady = () => window.cv && typeof window.cv.Mat === "function";
-    const finish = () => { clearInterval(poll); resolve(window.cv); };
+let cvWorker = null;
+let cvMsgId = 0;
+const cvPending = new Map();
 
-    if (isReady()) return resolve(window.cv);
+function getCvWorker() {
+  if (!cvWorker) {
+    cvWorker = new Worker("js/cv-worker.js");
+    cvWorker.onmessage = (e) => {
+      const { id, corners, error } = e.data;
+      const p = cvPending.get(id);
+      if (!p) return;
+      cvPending.delete(id);
+      if (error) p.reject(new Error(error));
+      else p.resolve(corners);
+    };
+    cvWorker.onerror = (e) => {
+      const err = new Error("Card detector worker failed: " + (e.message || "unknown"));
+      for (const [id, p] of cvPending) { p.reject(err); cvPending.delete(id); }
+    };
+  }
+  return cvWorker;
+}
 
-    const script = document.createElement("script");
-    script.src = "https://docs.opencv.org/4.9.0/opencv.js";
-    script.async = true;
-    script.onerror = () => { clearInterval(poll); reject(new Error("Failed to load OpenCV.js (network/CDN)")); };
-    document.head.appendChild(script);
-
-    poll = setInterval(() => {
-      if (isReady()) return finish();
-      if (Date.now() - started > TIMEOUT_MS) {
-        clearInterval(poll);
-        reject(new Error("OpenCV.js init timed out"));
-      }
-    }, 100);
+function detectCardInWorker(imageData) {
+  return new Promise((resolve, reject) => {
+    const id = ++cvMsgId;
+    cvPending.set(id, { resolve, reject });
+    // Transfer the pixel buffer to avoid a copy.
+    getCvWorker().postMessage({ id, imageData }, [imageData.data.buffer]);
   });
-  // If a load attempt fails, allow a later retry instead of caching the failure.
-  cvReady.catch(() => { cvReady = null; });
-  return cvReady;
 }
 
-// Locate the largest convex quadrilateral whose aspect ratio resembles an
-// ID-1 card, and return its 4 corners in natural-image coordinates, or null.
-const CARD_PROC_MAXDIM = 1024; // cap the working resolution to keep CV fast
-
-function findCardQuad(cv) {
-  const full = cv.imread(state.img); // natural-resolution RGBA
-  // Downscale to a bounded working size. Processing a full 12MP phone photo
-  // synchronously blocks the main thread long enough for the browser to kill
-  // the tab (RESULT_CODE_HUNG). At ~1MP this finishes in well under a second.
-  const longest = Math.max(full.rows, full.cols);
-  const procScale = Math.min(1, CARD_PROC_MAXDIM / longest);
-  const src = new cv.Mat();
-  if (procScale < 1) {
-    cv.resize(full, src, new cv.Size(Math.round(full.cols * procScale), Math.round(full.rows * procScale)), 0, 0, cv.INTER_AREA);
-    full.delete();
-  } else {
-    full.copyTo(src);
-    full.delete();
-  }
-  const gray = new cv.Mat();
-  const blur = new cv.Mat();
-  const edges = new cv.Mat();
-  const contours = new cv.MatVector();
-  const hierarchy = new cv.Mat();
-  let best = null;
-  try {
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
-    cv.Canny(blur, edges, 50, 150);
-    const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
-    cv.dilate(edges, edges, kernel);
-    kernel.delete();
-    cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
-
-    const imgArea = src.rows * src.cols;
-    for (let i = 0; i < contours.size(); i++) {
-      const cnt = contours.get(i);
-      const area = cv.contourArea(cnt);
-      if (area < imgArea * 0.01) { cnt.delete(); continue; } // ignore tiny blobs
-      const peri = cv.arcLength(cnt, true);
-      const approx = new cv.Mat();
-      cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
-      if (approx.rows === 4 && cv.isContourConvex(approx)) {
-        const pts = [];
-        for (let r = 0; r < 4; r++) {
-          pts.push({ x: approx.data32S[r * 2], y: approx.data32S[r * 2 + 1] });
-        }
-        const ordered = orderCorners(pts);
-        const wTop = dist(ordered[0], ordered[1]);
-        const wBot = dist(ordered[3], ordered[2]);
-        const hL = dist(ordered[0], ordered[3]);
-        const hR = dist(ordered[1], ordered[2]);
-        const longSide = (wTop + wBot) / 2;
-        const shortSide = (hL + hR) / 2;
-        const ratio = Math.max(longSide, shortSide) / Math.min(longSide, shortSide);
-        // Score: prefer card-like ratio and larger area.
-        const ratioErr = Math.abs(ratio - ID1_RATIO);
-        if (ratioErr < 0.35) {
-          const score = area / (1 + ratioErr * imgArea * 0.0005);
-          if (!best || score > best.score) best = { corners: ordered, score };
-        }
-      }
-      approx.delete();
-      cnt.delete();
-    }
-  } finally {
-    src.delete(); gray.delete(); blur.delete(); edges.delete();
-    contours.delete(); hierarchy.delete();
-  }
-  if (!best) return null;
-  // Map corners from the downscaled working image back to natural coordinates.
-  return best.corners.map((p) => ({ x: p.x / procScale, y: p.y / procScale }));
-}
-
-// Order 4 points as [top-left, top-right, bottom-right, bottom-left].
-function orderCorners(pts) {
-  const bySum = [...pts].sort((a, b) => (a.x + a.y) - (b.x + b.y));
-  const tl = bySum[0], br = bySum[3];
-  const rest = bySum.slice(1, 3).sort((a, b) => (a.x - a.y) - (b.x - b.y));
-  const bl = rest[0], tr = rest[1];
-  return [tl, tr, br, bl];
+// Draw the photo onto a small offscreen canvas and return its RGBA pixels plus
+// the scale factor from that frame back to natural-image coordinates.
+function downscaledFrame(img, maxDim) {
+  const longest = Math.max(img.naturalWidth, img.naturalHeight);
+  const procScale = Math.min(1, maxDim / longest);
+  const w = Math.max(1, Math.round(img.naturalWidth * procScale));
+  const h = Math.max(1, Math.round(img.naturalHeight * procScale));
+  const off = document.createElement("canvas");
+  off.width = w; off.height = h;
+  const octx = off.getContext("2d");
+  octx.drawImage(img, 0, 0, w, h);
+  return { imageData: octx.getImageData(0, 0, w, h), procScale };
 }
 
 async function detectCard() {
   try {
-    setStatus(window.cv && window.cv.Mat
-      ? "Detecting card…"
-      : "Loading card detector (one-time ~10 MB download)…");
-    const cv = await loadOpenCV();
-    setStatus("Detecting card…");
-    // Yield so the status repaints before the synchronous CV pass runs.
-    await new Promise((r) => setTimeout(r, 30));
-    const quad = findCardQuad(cv);
-    if (!quad) {
+    setStatus("Loading card detector (one-time ~10 MB download)…");
+    const { imageData, procScale } = downscaledFrame(state.img, CARD_PROC_MAXDIM);
+    const corners = await detectCardInWorker(imageData);
+    if (!corners) {
       setStatus("Card not auto-detected — place the orange markers on a card edge manually.");
       return;
     }
-    // Choose the long edge (top side) and map natural → canvas coords.
+    // Worker returns corners in the downscaled frame; map → natural → canvas.
+    const quad = corners.map((p) => ({ x: p.x / procScale, y: p.y / procScale }));
     const wTop = dist(quad[0], quad[1]);
     const hL = dist(quad[0], quad[3]);
     let a, b;
