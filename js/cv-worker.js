@@ -9,9 +9,11 @@ function loadOpenCV() {
   if (cvReady) return cvReady;
   cvReady = new Promise((resolve, reject) => {
     try {
-      self.importScripts("https://docs.opencv.org/4.9.0/opencv.js");
+      // Same-origin copy (served by GitHub Pages) — avoids a slow/blocked
+      // third-party fetch that could leave the loader spinning forever.
+      self.importScripts("opencv.js?v=8");
     } catch (e) {
-      reject(new Error("Failed to load OpenCV.js (network/CDN)"));
+      reject(new Error("Failed to load OpenCV.js"));
       return;
     }
     const started = Date.now();
