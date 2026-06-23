@@ -234,8 +234,23 @@ function loadOpenCV() {
 
 // Locate the largest convex quadrilateral whose aspect ratio resembles an
 // ID-1 card, and return its 4 corners in natural-image coordinates, or null.
+const CARD_PROC_MAXDIM = 1024; // cap the working resolution to keep CV fast
+
 function findCardQuad(cv) {
-  const src = cv.imread(state.img); // natural-resolution RGBA
+  const full = cv.imread(state.img); // natural-resolution RGBA
+  // Downscale to a bounded working size. Processing a full 12MP phone photo
+  // synchronously blocks the main thread long enough for the browser to kill
+  // the tab (RESULT_CODE_HUNG). At ~1MP this finishes in well under a second.
+  const longest = Math.max(full.rows, full.cols);
+  const procScale = Math.min(1, CARD_PROC_MAXDIM / longest);
+  const src = new cv.Mat();
+  if (procScale < 1) {
+    cv.resize(full, src, new cv.Size(Math.round(full.cols * procScale), Math.round(full.rows * procScale)), 0, 0, cv.INTER_AREA);
+    full.delete();
+  } else {
+    full.copyTo(src);
+    full.delete();
+  }
   const gray = new cv.Mat();
   const blur = new cv.Mat();
   const edges = new cv.Mat();
@@ -286,7 +301,9 @@ function findCardQuad(cv) {
     src.delete(); gray.delete(); blur.delete(); edges.delete();
     contours.delete(); hierarchy.delete();
   }
-  return best ? best.corners : null;
+  if (!best) return null;
+  // Map corners from the downscaled working image back to natural coordinates.
+  return best.corners.map((p) => ({ x: p.x / procScale, y: p.y / procScale }));
 }
 
 // Order 4 points as [top-left, top-right, bottom-right, bottom-left].
@@ -305,6 +322,8 @@ async function detectCard() {
       : "Loading card detector (one-time ~10 MB download)…");
     const cv = await loadOpenCV();
     setStatus("Detecting card…");
+    // Yield so the status repaints before the synchronous CV pass runs.
+    await new Promise((r) => setTimeout(r, 30));
     const quad = findCardQuad(cv);
     if (!quad) {
       setStatus("Card not auto-detected — place the orange markers on a card edge manually.");
